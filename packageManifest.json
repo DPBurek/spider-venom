@@ -1,0 +1,29 @@
+{
+  "packageName": "Spider Grills Venom Integration",
+  "author": "DPBurek",
+  "version": "1.0.0",
+  "minimumHEVersion": "2.3.0",
+  "dateReleased": "2026-11-19",
+  "documentationLink": "https://github.com/DPBurek/spider-venom/blob/master/README.md",
+  "releaseNotes": "Initial Hubitat Elevation Groovy port of brannonjames/spider-venom-home-assistant supporting Spider Grills Venom controllers via AWS Cognito and AWS IoT Device Shadow.",
+  "apps": [
+    {
+      "id": "c3a9d1e4-7b82-4f10-9c4e-2a6b8d0e1f03",
+      "name": "Spider Grills Venom Manager",
+      "namespace": "dpburek",
+      "location": "https://raw.githubusercontent.com/DPBurek/spider-venom/master/apps/spider-venom-manager.groovy",
+      "required": true,
+      "oauth": false,
+      "primary": true
+    }
+  ],
+  "drivers": [
+    {
+      "id": "d4b0e2f5-8c93-4a21-ad5f-3b7c9e1f2a04",
+      "name": "Spider Grills Venom",
+      "namespace": "dpburek",
+      "location": "https://raw.githubusercontent.com/DPBurek/spider-venom/master/drivers/spider-venom-driver.groovy",
+      "required": true
+    }
+  ]
+}
