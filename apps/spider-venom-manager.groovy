@@ -1,8 +1,8 @@
 /**
  *  Spider Grills Venom Manager
  *
- *  Hubitat Elevation Parent App for Spider Grills Venom controllers
- *  via the Spider Grills cloud discovery API and AWS Cognito + AWS IoT Device Shadow.
+ *  Hubitat Elevation Parent App for Spider Grills Venom / Huntsman controllers
+ *  via the Spider Grills cloud discovery API and AWS Cognito + AWS IoT MQTT-over-WebSocket.
  *
  *  Ported from brannonjames/spider-venom-home-assistant (Python / Home Assistant):
  *  https://github.com/brannonjames/spider-venom-home-assistant
@@ -20,7 +20,7 @@ import java.util.TimeZone
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
-@Field static final String APP_VERSION = "1.0.0"
+@Field static final String APP_VERSION = "1.1.0"
 @Field static final String CHILD_NAMESPACE = "dpburek"
 @Field static final String CHILD_DRIVER_NAME = "Spider Grills Venom"
 
@@ -32,10 +32,9 @@ import javax.crypto.spec.SecretKeySpec
 @Field static final Long CREDENTIAL_REFRESH_BUFFER_MS = 300000L // 5 minutes
 
 @Field static final Map POLL_INTERVAL_OPTIONS = [
-    "0"  : "Manual only (no automatic polling)",
-    "15" : "Every 15 seconds",
-    "30" : "Every 30 seconds (Recommended)",
-    "60" : "Every 1 minute",
+    "0"  : "Push / Manual only (no periodic poll)",
+    "30" : "Every 30 seconds",
+    "60" : "Every 1 minute (Recommended)",
     "300": "Every 5 minutes",
     "600": "Every 10 minutes",
     "900": "Every 15 minutes"
@@ -56,7 +55,7 @@ definition(
     name: "Spider Grills Venom Manager",
     namespace: "dpburek",
     author: "DPBurek",
-    description: "Connects Hubitat Elevation to Spider Grills Venom controllers via AWS IoT Device Shadow.",
+    description: "Connects Hubitat Elevation to Spider Grills Venom / Huntsman controllers via AWS IoT MQTT-over-WebSocket.",
     category: "Convenience",
     iconUrl: "",
     iconX2Url: "",
@@ -77,8 +76,8 @@ preferences {
 def mainPage() {
     dynamicPage(name: "mainPage", title: "Spider Grills Venom Manager v${APP_VERSION}", install: true, uninstall: true) {
         section("<b>Device Discovery</b>") {
-            paragraph "Sign in once with your Spider Grills email and password to discover your Venom controller(s). " +
-                      "Your password and access token are never saved after discovery—ongoing communication uses temporary AWS Cognito credentials."
+            paragraph "Sign in once with your Spider Grills email and password to discover your Venom / Huntsman controller(s). " +
+                      "Your password and access token are never saved after discovery—ongoing communication uses temporary AWS Cognito credentials over AWS IoT MQTT-over-WebSocket."
             href(
                 name: "toDiscoverPage",
                 page: "discoverPage",
@@ -119,7 +118,8 @@ def mainPage() {
                     String temp = child.currentValue("temperature")
                     String target = child.currentValue("heatingSetpoint")
                     String pwr = child.currentValue("switch")
-                    paragraph "• <b>${child.displayName}</b> — Power: ${pwr ?: 'unknown'}, Temp: ${temp != null ? temp + '°' : 'N/A'}, Target: ${target != null ? target + '°' : 'N/A'}"
+                    String conn = child.currentValue("connectionStatus")
+                    paragraph "• <b>${child.displayName}</b> — MQTT: ${conn ?: 'unknown'}, Power: ${pwr ?: 'unknown'}, Temp: ${temp != null ? temp + '°' : 'N/A'}, Target: ${target != null ? target + '°' : 'N/A'}"
                 }
                 input name: "btnRefreshAll", type: "button", title: "Refresh All Devices Now"
             }
@@ -129,9 +129,9 @@ def mainPage() {
             input(
                 name: "pollInterval",
                 type: "enum",
-                title: "Shadow Polling Interval",
+                title: "Shadow Polling Interval (in addition to real-time MQTT push updates)",
                 options: POLL_INTERVAL_OPTIONS,
-                defaultValue: "30",
+                defaultValue: "60",
                 required: true
             )
             input(
@@ -193,7 +193,7 @@ def manualAddPage() {
             paragraph "If you already know your Venom's AWS IoT Thing Name, you can add it directly without signing into your Spider Grills account."
             input name: "manualThingName", type: "text", title: "AWS IoT Thing Name", required: false
             input name: "manualDeviceLabel", type: "text", title: "Friendly Device Name (optional)", required: false
-            input name: "btnAddManual", type: "button", title: "Validate & Add Device"
+            input name: "btnAddManual", type: "button", title: "Add Device"
         }
 
         if (state.manualMessage) {
@@ -268,16 +268,13 @@ void disableDebugLogging() {
 
 void schedulePolling() {
     unschedule("pollAllDevices")
-    Integer interval = (settings.pollInterval ?: "30") as Integer
+    Integer interval = (settings.pollInterval ?: "60") as Integer
     if (interval <= 0) {
-        logDebug "Automatic polling disabled."
+        logDebug "Periodic polling disabled (relying on real-time MQTT push updates & manual refresh)."
         return
     }
 
     switch (interval) {
-        case 15:
-            schedule("0/15 * * * * ?", "pollAllDevices")
-            break
         case 30:
             schedule("0/30 * * * * ?", "pollAllDevices")
             break
@@ -294,7 +291,7 @@ void schedulePolling() {
             runEvery15Minutes("pollAllDevices")
             break
         default:
-            schedule("0/30 * * * * ?", "pollAllDevices")
+            runEvery1Minute("pollAllDevices")
             break
     }
     logDebug "Scheduled shadow polling every ${interval} seconds."
@@ -324,8 +321,8 @@ void syncChildDevices() {
                 CHILD_DRIVER_NAME,
                 dni,
                 [
-                    name : CHILD_DRIVER_NAME,
-                    label: label,
+                    name       : CHILD_DRIVER_NAME,
+                    label      : label,
                     isComponent: false
                 ]
             )
@@ -348,17 +345,10 @@ String buildChildDni(String thingName) {
 
 void pollAllDevices() {
     getChildDevices().each { child ->
-        String thingName = child.getDataValue("thingName")
-        if (!thingName) {
-            thingName = child.deviceNetworkId.replaceFirst(/^spider-venom-/, "")
-        }
         try {
-            Map shadow = getShadow(thingName)
-            if (shadow != null) {
-                child.applyShadow(shadow)
-            }
+            child.refresh()
         } catch (Exception e) {
-            log.warn "Failed to poll Spider Venom '${child.displayName}' (${thingName}): ${e.message}"
+            log.warn "Failed to trigger refresh for '${child.displayName}': ${e.message}"
         }
     }
 }
@@ -401,7 +391,6 @@ void performAccountDiscovery() {
             state.discoveryMessage = "<span style='color:orange'>Signed in successfully, but no Venom devices were found on this account.</span>"
         } else {
             state.discoveredDevices = discovered
-            // Auto-select newly discovered devices if none are selected yet
             if (!settings.selectedDevices) {
                 app.updateSetting("selectedDevices", [value: discovered.keySet().toList(), type: "enum"])
             }
@@ -411,7 +400,6 @@ void performAccountDiscovery() {
         log.error "Spider Grills discovery failed: ${e.message}"
         state.discoveryMessage = "<span style='color:red'>Discovery failed: ${e.message}</span>"
     } finally {
-        // Never persist password (or email) after one-time discovery
         app.removeSetting("spiderPassword")
         app.removeSetting("spiderEmail")
     }
@@ -426,35 +414,26 @@ void performManualAdd() {
         return
     }
 
-    try {
-        Map shadow = getShadow(thingName)
-        if (shadow == null) {
-            throw new RuntimeException("Empty shadow response")
-        }
-        Map<String, Map> discovered = state.discoveredDevices ?: [:]
-        String name = customLabel ?: (shadow?.state?.reported?.model ? "Spider ${shadow.state.reported.model}" : "Spider Venom")
-        discovered[thingName] = [
-            thingName: thingName,
-            name     : name,
-            label    : "${name} (${thingName})"
-        ]
-        state.discoveredDevices = discovered
+    Map<String, Map> discovered = state.discoveredDevices ?: [:]
+    String name = customLabel ?: "Spider Venom"
+    discovered[thingName] = [
+        thingName: thingName,
+        name     : name,
+        label    : "${name} (${thingName})"
+    ]
+    state.discoveredDevices = discovered
 
-        List<String> currentSelected = settings.selectedDevices instanceof List
-            ? settings.selectedDevices.collect { it.toString() }
-            : (settings.selectedDevices ? [settings.selectedDevices.toString()] : [])
-        if (!currentSelected.contains(thingName)) {
-            currentSelected.add(thingName)
-            app.updateSetting("selectedDevices", [value: currentSelected, type: "enum"])
-        }
-
-        state.manualMessage = "<span style='color:green'>Validated shadow access for '${thingName}'! Click Next to save.</span>"
-        app.removeSetting("manualThingName")
-        app.removeSetting("manualDeviceLabel")
-    } catch (Exception e) {
-        log.error "Manual Thing Name validation failed for '${thingName}': ${e.message}"
-        state.manualMessage = "<span style='color:red'>Could not read shadow for '${thingName}': ${e.message}</span>"
+    List<String> currentSelected = settings.selectedDevices instanceof List
+        ? settings.selectedDevices.collect { it.toString() }
+        : (settings.selectedDevices ? [settings.selectedDevices.toString()] : [])
+    if (!currentSelected.contains(thingName)) {
+        currentSelected.add(thingName)
+        app.updateSetting("selectedDevices", [value: currentSelected, type: "enum"])
     }
+
+    state.manualMessage = "<span style='color:green'>Added '${thingName}'! Click Next and Done to create the child device and connect via MQTT.</span>"
+    app.removeSetting("manualThingName")
+    app.removeSetting("manualDeviceLabel")
 }
 
 private String accountLogin(String email, String password) {
@@ -555,90 +534,60 @@ private String extractDeviceName(Map device) {
 }
 
 // ============================================================================
-// AWS IoT Device Shadow Client (Called by Parent Polling & Child Driver)
+// AWS IoT MQTT-over-WebSocket Presigned URL (Called by Child Driver)
 // ============================================================================
 
-Map getShadow(String thingName) {
-    return iotShadowRequest("GET", thingName, "")
-}
-
-Map updateDesiredShadow(String thingName, Map desired) {
-    String payload = JsonOutput.toJson([state: [desired: desired]])
-    return iotShadowRequest("POST", thingName, payload)
-}
-
-private Map iotShadowRequest(String method, String thingName, String payload, boolean isRetry = false) {
-    Map creds = getAwsCredentials(isRetry)
+String getPresignedMqttUrl(boolean forceRefresh = false) {
+    Map creds = getAwsCredentials(forceRefresh)
     String endpoint = cleanEndpoint(settings.awsEndpoint ?: DEFAULT_ENDPOINT)
     String region = (settings.awsRegion ?: DEFAULT_REGION).trim()
-    String path = "/things/${rfc3986Encode(thingName)}/shadow"
-    String url = "https://${endpoint}${path}"
+    String service = "iotdevicegateway"
 
-    Map<String, String> headers = buildSignedHeaders(
-        method,
-        endpoint,
-        region,
-        "iotdata",
-        path,
-        "",
-        payload,
-        creds
-    )
+    Date nowDate = new Date()
+    SimpleDateFormat amzFmt = new SimpleDateFormat("yyyyMMdd'T'HHmmss'Z'")
+    amzFmt.setTimeZone(TimeZone.getTimeZone("UTC"))
+    SimpleDateFormat dateFmt = new SimpleDateFormat("yyyyMMdd")
+    dateFmt.setTimeZone(TimeZone.getTimeZone("UTC"))
 
-    Map params = [
-        uri        : url,
-        headers    : headers,
-        contentType: "text/plain",
-        timeout    : 15
+    String amzDate = amzFmt.format(nowDate)
+    String dateStamp = dateFmt.format(nowDate)
+    String credentialScope = "${dateStamp}/${region}/${service}/aws4_request"
+
+    // Query parameters MUST be sorted alphabetically by key before signing
+    Map<String, String> query = [
+        "X-Amz-Algorithm"    : "AWS4-HMAC-SHA256",
+        "X-Amz-Credential"   : "${creds.accessKeyId}/${credentialScope}",
+        "X-Amz-Date"         : amzDate,
+        "X-Amz-SignedHeaders": "host"
     ]
 
-    if (method == "POST") {
-        params.requestContentType = "application/json"
-        params.body = payload
-    }
+    List<String> sortedKeys = query.keySet().sort()
+    String queryString = sortedKeys.collect { String k ->
+        "${k}=${rfc3986Encode(query[k])}"
+    }.join("&")
 
-    String rawBody = ""
-    int statusCode = 0
+    String canonicalRequest = [
+        "GET",
+        "/mqtt",
+        queryString,
+        "host:${endpoint}\n",
+        "host",
+        sha256Hex("")
+    ].join("\n")
 
-    try {
-        if (method == "POST") {
-            httpPost(params) { resp ->
-                statusCode = resp.status
-                rawBody = readResponseBody(resp.data)
-            }
-        } else {
-            httpGet(params) { resp ->
-                statusCode = resp.status
-                rawBody = readResponseBody(resp.data)
-            }
-        }
-    } catch (groovyx.net.http.HttpResponseException e) {
-        statusCode = e.response?.status ?: 0
-        rawBody = readResponseBody(e.response?.data)
-        logRedactedResponse("IoT shadow ${method}", statusCode, rawBody)
+    String stringToSign = [
+        "AWS4-HMAC-SHA256",
+        amzDate,
+        credentialScope,
+        sha256Hex(canonicalRequest)
+    ].join("\n")
 
-        // Retry once with fresh Cognito credentials on 403
-        if (statusCode == 403 && !isRetry) {
-            logDebug "IoT shadow returned HTTP 403; refreshing Cognito credentials and retrying..."
-            state.remove("awsCreds")
-            return iotShadowRequest(method, thingName, payload, true)
-        }
-        String snippet = rawBody.length() > 300 ? rawBody.substring(0, 300) : rawBody
-        throw new RuntimeException("IoT shadow request returned HTTP ${statusCode}: ${snippet}")
-    }
+    byte[] signingKey = getSignatureKey(creds.secretKey as String, dateStamp, region, service)
+    String signature = hmacSha256(signingKey, stringToSign).encodeHex().toString()
 
-    logRedactedResponse("IoT shadow ${method}", statusCode, rawBody)
-
-    if (statusCode != 200) {
-        String snippet = rawBody.length() > 300 ? rawBody.substring(0, 300) : rawBody
-        throw new RuntimeException("IoT shadow request returned HTTP ${statusCode}: ${snippet}")
-    }
-
-    def parsed = new JsonSlurper().parseText(rawBody)
-    if (!(parsed instanceof Map)) {
-        throw new RuntimeException("IoT shadow response had an unexpected shape")
-    }
-    return parsed as Map
+    // AWS IoT expects X-Amz-Security-Token appended AFTER signing (not included in canonical query)
+    String wsPath = "/mqtt?${queryString}&X-Amz-Signature=${signature}&X-Amz-Security-Token=${rfc3986Encode(creds.sessionToken as String)}"
+    return "wss://${endpoint}${wsPath}"
 }
 
 // ============================================================================
@@ -733,72 +682,8 @@ private Map cognitoPost(String region, String target, Map payloadMap) {
 }
 
 // ============================================================================
-// AWS Signature Version 4 (SigV4) Signing
+// AWS SigV4 Crypto Helpers
 // ============================================================================
-
-private Map<String, String> buildSignedHeaders(
-    String method,
-    String host,
-    String region,
-    String service,
-    String path,
-    String queryString,
-    String payload,
-    Map creds
-) {
-    Date nowDate = new Date()
-    SimpleDateFormat amzFmt = new SimpleDateFormat("yyyyMMdd'T'HHmmss'Z'")
-    amzFmt.setTimeZone(TimeZone.getTimeZone("UTC"))
-    SimpleDateFormat dateFmt = new SimpleDateFormat("yyyyMMdd")
-    dateFmt.setTimeZone(TimeZone.getTimeZone("UTC"))
-
-    String amzDate = amzFmt.format(nowDate)
-    String dateStamp = dateFmt.format(nowDate)
-    String payloadHash = sha256Hex(payload ?: "")
-
-    Map<String, String> canonicalHeaderMap = [
-        "host"                : host,
-        "x-amz-date"          : amzDate,
-        "x-amz-security-token": creds.sessionToken as String
-    ]
-    List<String> sortedKeys = canonicalHeaderMap.keySet().sort()
-    String signedHeaders = sortedKeys.join(";")
-    StringBuilder canonicalHeaders = new StringBuilder()
-    sortedKeys.each { String k ->
-        canonicalHeaders.append(k).append(":").append(canonicalHeaderMap[k]).append("\n")
-    }
-
-    String canonicalRequest = [
-        method,
-        path,
-        queryString,
-        canonicalHeaders.toString(),
-        signedHeaders,
-        payloadHash
-    ].join("\n")
-
-    String credentialScope = "${dateStamp}/${region}/${service}/aws4_request"
-    String stringToSign = [
-        "AWS4-HMAC-SHA256",
-        amzDate,
-        credentialScope,
-        sha256Hex(canonicalRequest)
-    ].join("\n")
-
-    byte[] signingKey = getSignatureKey(creds.secretKey as String, dateStamp, region, service)
-    String signature = hmacSha256(signingKey, stringToSign).encodeHex().toString()
-
-    String authHeader = "AWS4-HMAC-SHA256 " +
-        "Credential=${creds.accessKeyId}/${credentialScope}, " +
-        "SignedHeaders=${signedHeaders}, " +
-        "Signature=${signature}"
-
-    return [
-        "Authorization"       : authHeader,
-        "x-amz-date"          : amzDate,
-        "x-amz-security-token": creds.sessionToken as String
-    ]
-}
 
 private byte[] getSignatureKey(String secretKey, String dateStamp, String region, String service) {
     byte[] kDate = hmacSha256(("AWS4" + secretKey).getBytes("UTF-8"), dateStamp)
