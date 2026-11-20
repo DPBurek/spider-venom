@@ -441,7 +441,7 @@ void performManualAdd() {
         state.discoveredDevices = discovered
 
         List<String> currentSelected = settings.selectedDevices instanceof List
-            ? new ArrayList<>(settings.selectedDevices)
+            ? settings.selectedDevices.collect { it.toString() }
             : (settings.selectedDevices ? [settings.selectedDevices.toString()] : [])
         if (!currentSelected.contains(thingName)) {
             currentSelected.add(thingName)
@@ -838,15 +838,15 @@ private String readResponseBody(def data) {
     if (data instanceof String) {
         return data
     }
-    if (data instanceof java.io.Reader) {
-        return data.text
-    }
-    if (data instanceof java.io.InputStream) {
-        return data.getText("UTF-8")
-    }
     if (data instanceof Map || data instanceof List) {
         return JsonOutput.toJson(data)
     }
+    try {
+        def txt = data.text
+        if (txt != null) {
+            return txt.toString()
+        }
+    } catch (ignored) {}
     return data.toString()
 }
 
