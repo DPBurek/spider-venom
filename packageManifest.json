@@ -1,11 +1,11 @@
 {
   "packageName": "Spider Grills Venom Integration",
   "author": "DPBurek",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "minimumHEVersion": "2.3.0",
   "dateReleased": "2026-11-19",
   "documentationLink": "https://github.com/DPBurek/spider-venom/blob/master/README.md",
-  "releaseNotes": "Switch AWS IoT shadow transport from HTTP (revoked with 403 by Spider Grills on 2026-09-30) to native MQTT-over-WebSocket (wss://.../mqtt, SigV4 presigned) with real-time push updates and Huntsman 700°F target support.",
+  "releaseNotes": "Fix interfaces.webSocket.connect(Map options, String url) argument order in Spider Grills Venom driver.",
   "apps": [
     {
       "id": "c3a9d1e4-7b82-4f10-9c4e-2a6b8d0e1f03",

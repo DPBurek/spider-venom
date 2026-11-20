@@ -19,7 +19,7 @@ import java.util.TimeZone
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-@Field static final String DRIVER_VERSION = "1.1.0"
+@Field static final String DRIVER_VERSION = "1.1.1"
 @Field static final Integer MIN_TARGET_TEMPERATURE = 150
 @Field static final Integer DEFAULT_MAX_TARGET_TEMPERATURE = 700
 @Field static final Long OPTIMISTIC_TTL_MS = 60000L // 60 seconds
@@ -203,11 +203,11 @@ private void connectMqtt(boolean forceRefreshCreds = false) {
     logDebug "Connecting to AWS IoT MQTT WebSocket..."
 
     try {
-        interfaces.webSocket.connect(wsUrl, [
+        interfaces.webSocket.connect([
             byteInterface: true,
             pingInterval : 30,
             headers      : ["Sec-WebSocket-Protocol": "mqtt"]
-        ])
+        ], wsUrl)
     } catch (Exception e) {
         log.error "${device.displayName}: WebSocket connect failed: ${e.message}"
         emitEvent("connectionStatus", "disconnected", null, null)
